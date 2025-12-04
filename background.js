@@ -148,8 +148,8 @@ async function checkAndBlockRequest(domain, url, mainDomain, features) {
         const prediction = net.run(features);
         console.log("[checkAndBlockRequest]", prediction[0]);
         // Если вероятность рекламы высокая
-        if (prediction[0] > 0.7) {
-            console.log(`Высокая вероятность рекламы: ${domain} (${prediction.toFixed(2)})`);
+        if (prediction[0] > 0.9) {
+            console.log(`Высокая вероятность рекламы: ${domain} (${prediction[0].toFixed(2)})`);
             
             // Добавляем в обучающую выборку
             await trainModel(features, 1);
