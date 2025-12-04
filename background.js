@@ -146,9 +146,9 @@ async function checkAndBlockRequest(domain, url, mainDomain, features) {
     try {
         // Предсказание модели
         const prediction = net.run(features);
-        
+        console.log("[checkAndBlockRequest]", prediction[0]);
         // Если вероятность рекламы высокая
-        if (prediction > 0.7) {
+        if (prediction[0] > 0.7) {
             console.log(`Высокая вероятность рекламы: ${domain} (${prediction.toFixed(2)})`);
             
             // Добавляем в обучающую выборку
@@ -244,9 +244,9 @@ async function trainModel(features, label) {
 
         // Обучение с ограничениями для производительности
         net.train(trainingData, { 
-            iterations: 50, 
+            iterations: 1000, 
             log: false, 
-            errorThresh: 0.05,
+            errorThresh: 0.005,
             learningRate: 0.3
         });
         
@@ -264,6 +264,7 @@ async function trainModel(features, label) {
 
 // Обновление динамических правил через declarativeNetRequest API
 async function updateBlockingRules(domainToBlock) {
+    console.log("[updateBlockingRules] ", domainToBlock);
     try {
         // Проверяем, нет ли уже правила для этого домена
         const existingRules = await chrome.declarativeNetRequest.getDynamicRules();
