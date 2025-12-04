@@ -4,9 +4,10 @@
   "version": "1.0",
   "permissions": [
     "declarativeNetRequest",
+    "declarativeNetRequestFeedback",
+    "webRequest",
     "storage",
-    "activeTab",
-    "scripting"
+    "tabs"
   ],
   "background": {
     "service_worker": "background.js"
@@ -19,5 +20,8 @@
   },
   "host_permissions": [
     "<all_urls>"
-  ]
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
+  }
 }

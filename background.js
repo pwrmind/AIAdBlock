@@ -1,4 +1,4 @@
-// background.js (Service Worker)
+// background.js (Service Worker) - без использования blocking webRequest
 
 // Импортируем brain.js и нашу модель признаков
 importScripts('brain-browser.min.js');
@@ -7,8 +7,8 @@ importScripts('featureExtractor.js');
 let net;
 let trainingData = [];
 let ruleIdCounter = 1;
-let sessionData = {}; // Хранение данных по сессиям
-let isTraining = false; // Флаг для предотвращения одновременного обучения
+let sessionData = {};
+let isTraining = false;
 
 // Инициализация сети или загрузка из хранилища
 async function initializeNetwork() {
@@ -31,67 +31,138 @@ async function initializeNetwork() {
         sessionData = storedData.sessionData;
     }
     
-    // Регистрируем слушатели для сбора данных
+    // Регистрируем слушатели для сбора данных (без blocking!)
     registerRequestListeners();
     registerTabListeners();
 }
 
 // Регистрация слушателей для сбора данных о запросах
+// ТОЛЬКО пассивное прослушивание без blocking
 function registerRequestListeners() {
+    // Используем только passive listener для сбора данных
     chrome.webRequest.onBeforeRequest.addListener(
         (details) => {
             // Пропускаем запросы к самим правилам расширения
             if (details.url.includes('chrome-extension://') || 
                 details.url.includes('moz-extension://')) return;
             
-            // Получаем текущую активную вкладку для определения mainDomain
-            chrome.tabs.query({active: true, currentWindow: true}, (tabs) => {
-                if (tabs.length > 0) {
-                    const tab = tabs[0];
-                    const tabId = tab.id;
-                    const tabUrl = tab.url;
-                    
-                    if (!tabUrl || tabUrl.startsWith('chrome://')) return;
-                    
-                    const mainDomain = new URL(tabUrl).hostname;
-                    const targetUrl = details.url;
-                    const targetDomain = new URL(targetUrl).hostname;
-                    
-                    // Извлекаем признаки
-                    const features = extractFeaturesFromUrl(targetUrl, mainDomain);
-                    
-                    // Проверяем, является ли запрос сторонним и имеет признаки рекламы
-                    const thirdParty = targetDomain !== mainDomain;
-                    const isAd = features[1] > 0.5; // Второй признак - hasBlockingKeyword
-                    
-                    // Сохраняем в сессионные данные только сторонние запросы с признаками рекламы
-                    if (thirdParty && isAd) {
-                        // Инициализируем данные сессии, если их еще нет
-                        if (!sessionData[tabId]) {
-                            sessionData[tabId] = {
-                                mainDomain: mainDomain,
-                                timestamp: Date.now(),
-                                collectedData: []
-                            };
-                        }
-                        
-                        // Сохраняем данные о запросе
-                        sessionData[tabId].collectedData.push({
-                            url: targetUrl,
-                            domain: targetDomain,
-                            features: features,
-                            timestamp: Date.now()
-                        });
-                        
-                        // Сохраняем в хранилище для устойчивости к перезагрузкам
-                        chrome.storage.local.set({ sessionData: sessionData });
-                    }
-                }
-            });
+            // Асинхронно обрабатываем запрос
+            setTimeout(() => {
+                processRequestData(details);
+            }, 0);
         },
-        {urls: ["<all_urls>"]},
-        ["blocking"]
+        { urls: ["<all_urls>"] }
+        // НЕ ИСПОЛЬЗУЕМ ["blocking"] - это доступно только для policy-installed extensions
     );
+    
+    // Также можно слушать completed запросы для более полной информации
+    chrome.webRequest.onCompleted.addListener(
+        (details) => {
+            if (details.url.includes('chrome-extension://') || 
+                details.url.includes('moz-extension://')) return;
+            
+            // Можно собирать дополнительную информацию о завершенных запросах
+            logRequestInfo(details);
+        },
+        { urls: ["<all_urls>"] }
+    );
+}
+
+// Обработка данных запроса асинхронно
+async function processRequestData(details) {
+    try {
+        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+        if (!tab || !tab.url || tab.url.startsWith('chrome://')) return;
+        
+        const mainDomain = new URL(tab.url).hostname;
+        const targetUrl = details.url;
+        const targetDomain = new URL(targetUrl).hostname;
+        
+        // Извлекаем признаки
+        const features = extractFeaturesFromUrl(targetUrl, mainDomain);
+        
+        // Проверяем, является ли запрос сторонним и имеет признаки рекламы
+        const thirdParty = targetDomain !== mainDomain;
+        const isAd = features[1] > 0.5; // Второй признак - hasBlockingKeyword
+        
+        // Сохраняем в сессионные данные только сторонние запросы с признаками рекламы
+        if (thirdParty && isAd) {
+            const tabId = tab.id;
+            
+            // Инициализируем данные сессии, если их еще нет
+            if (!sessionData[tabId]) {
+                sessionData[tabId] = {
+                    mainDomain: mainDomain,
+                    timestamp: Date.now(),
+                    collectedData: []
+                };
+            }
+            
+            // Сохраняем данные о запросе
+            sessionData[tabId].collectedData.push({
+                url: targetUrl,
+                domain: targetDomain,
+                features: features,
+                timestamp: Date.now(),
+                requestId: details.requestId
+            });
+            
+            // Сохраняем в хранилище для устойчивости к перезагрузкам
+            await chrome.storage.local.set({ sessionData: sessionData });
+            
+            // Проверяем модель для потенциальной блокировки
+            await checkAndBlockRequest(targetDomain, targetUrl, mainDomain, features);
+        }
+    } catch (error) {
+        // Игнорируем ошибки, связанные с недоступностью вкладки или URL
+        if (!error.message.includes('Invalid URL') && !error.message.includes('No tab')) {
+            console.debug('Ошибка обработки запроса:', error.message);
+        }
+    }
+}
+
+// Логирование информации о запросе
+function logRequestInfo(details) {
+    // Можно собирать статистику или логировать для отладки
+    const logEntry = {
+        url: details.url,
+        method: details.method,
+        type: details.type,
+        statusCode: details.statusCode,
+        timestamp: Date.now()
+    };
+    
+    // Сохраняем ограниченное количество логов
+    chrome.storage.local.get(['requestLogs'], (result) => {
+        const logs = result.requestLogs || [];
+        logs.push(logEntry);
+        if (logs.length > 1000) logs.shift(); // Ограничиваем размер
+        chrome.storage.local.set({ requestLogs: logs });
+    });
+}
+
+// Проверка и блокировка запросов через declarativeNetRequest
+async function checkAndBlockRequest(domain, url, mainDomain, features) {
+    try {
+        // Предсказание модели
+        const prediction = net.run(features);
+        
+        // Если вероятность рекламы высокая
+        if (prediction > 0.7) {
+            console.log(`Высокая вероятность рекламы: ${domain} (${prediction.toFixed(2)})`);
+            
+            // Добавляем в обучающую выборку
+            await trainModel(features, 1);
+            
+            // Добавляем правило блокировки для этого домена
+            await updateBlockingRules(domain);
+            
+            return true;
+        }
+    } catch (error) {
+        console.debug('Ошибка при проверке запроса:', error.message);
+    }
+    return false;
 }
 
 // Регистрация слушателей вкладок для определения завершения сессий
@@ -99,24 +170,17 @@ function registerTabListeners() {
     // Отслеживаем закрытие вкладок
     chrome.tabs.onRemoved.addListener((tabId) => {
         if (sessionData[tabId]) {
-            // Запускаем обучение после небольшой задержки, чтобы собрать все данные
+            // Запускаем обучение после небольшой задержки
             setTimeout(() => processSessionData(tabId), 1000);
         }
     });
     
     // Отслеживаем переход на другую страницу
     chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
-        if (changeInfo.url && sessionData[tabId]) {
-            // Старая сессия завершена, запускаем обучение
-            setTimeout(() => processSessionData(tabId), 1000);
+        if (changeInfo.status === 'complete' && sessionData[tabId]) {
+            // Страница загружена полностью, можно обработать данные сессии
+            setTimeout(() => processSessionData(tabId), 2000);
         }
-    });
-    
-    // Обработка закрытия всего браузера (насколько это возможно)
-    chrome.runtime.onSuspend.addListener(() => {
-        Object.keys(sessionData).forEach(tabId => {
-            processSessionData(tabId);
-        });
     });
 }
 
@@ -130,29 +194,27 @@ async function processSessionData(tabId) {
         const session = sessionData[tabId];
         const collectedData = session.collectedData;
         
-        // Обучаем модель только для самых подозрительных запросов
-        const suspiciousRequests = collectedData.filter(item => {
-            // Отбираем запросы с высокой вероятностью рекламы
-            const [isThirdParty, hasBlockingKeyword, isAsset] = item.features;
-            return hasBlockingKeyword > 0.5 && isThirdParty > 0.5;
-        });
+        if (collectedData.length === 0) {
+            delete sessionData[tabId];
+            return;
+        }
         
-        // Ограничиваем количество запросов для обучения в одной сессии
-        const limitedRequests = suspiciousRequests.slice(0, 10);
+        console.log(`Обработка сессии для домена ${session.mainDomain}. Записей: ${collectedData.length}`);
         
-        console.log(`Обработка сессии для домена ${session.mainDomain}. Всего собрано: ${collectedData.length}, Будет обучено на: ${limitedRequests.length} запросах`);
+        // Обучаем модель на части данных
+        const sampleSize = Math.min(collectedData.length, 20);
+        const sampleData = collectedData.slice(0, sampleSize);
         
-        for (const item of limitedRequests) {
-            // Предсказание модели
-            const prediction = net.run(item.features);
-            
-            // Если вероятность рекламы > 0.6, добавляем в обучающую выборку с меткой 1
-            if (prediction > 0.6) {
-                await trainModel(item.features, 1);
+        for (const item of sampleData) {
+            try {
+                const prediction = net.run(item.features);
                 
-                // Добавляем правило блокировки для этого домена
-                await updateBlockingRules(item.domain);
-                console.log(`Добавлено правило блокировки для домена: ${item.domain}`);
+                // Если модель уверена, что это реклама, добавляем в обучение
+                if (prediction > 0.6) {
+                    await trainModel(item.features, 1);
+                }
+            } catch (error) {
+                console.debug('Ошибка при обучении на элементе:', error.message);
             }
         }
         
@@ -169,77 +231,116 @@ async function processSessionData(tabId) {
 
 // Функция для обучения модели на новых данных
 async function trainModel(features, label) {
-    trainingData.push({
-        input: features,
-        output: [label]
-    });
-    
-    // Ограничиваем размер обучающей выборки для производительности
-    if (trainingData.length > 1000) {
-        trainingData = trainingData.slice(-1000);
-    }
-
-    net.train(trainingData, { iterations: 100, log: false, errorThresh: 0.01 });
-    
-    // Сохраняем модель и данные
-    await chrome.storage.local.set({ 
-        brainModel: net.toJSON(),
-        trainingData: trainingData
-    });
-}
-
-// Обновление динамических правил dNR
-async function updateBlockingRules(domainToBlock) {
-    // Проверяем, нет ли уже правила для этого домена
-    const existingRules = await new Promise(resolve => {
-        chrome.declarativeNetRequest.getDynamicRules(resolve);
-    });
-    
-    const alreadyBlocked = existingRules.some(rule => 
-        rule.condition && rule.condition.urlFilter && rule.condition.urlFilter.includes(domainToBlock)
-    );
-    
-    if (alreadyBlocked) {
-        console.log(`Домен ${domainToBlock} уже заблокирован`);
-        return;
-    }
-
-    const currentId = ruleIdCounter++;
-    
-    const newRule = {
-        id: currentId,
-        priority: 1,
-        action: { type: "block" },
-        condition: { 
-            urlFilter: `||${domainToBlock}^`, 
-            resourceTypes: ["script", "image", "sub_frame", "xmlhttprequest", "other", "media"]
-        }
-    };
-
-    chrome.declarativeNetRequest.updateDynamicRules({
-        addRules: [newRule]
-    }, () => {
-        if (chrome.runtime.lastError) {
-            console.error("Ошибка при добавлении правила:", chrome.runtime.lastError);
-            // Возвращаем счетчик, если правило не добавлено
-            ruleIdCounter--;
-        } else {
-            console.log(`Dynamic rule added for: ${domainToBlock} with ID: ${currentId}`);
-            chrome.storage.local.set({ ruleIdCounter: ruleIdCounter });
-        }
-    });
-}
-
-// Слушаем сообщения из popup.js (обратная связь от пользователя)
-chrome.runtime.onMessage.addListener(async (request, sender, sendResponse) => {
-    if (request.action === "userFeedback") {
-        const { url, block } = request;
+    try {
+        trainingData.push({
+            input: features,
+            output: [label]
+        });
         
-        // Получаем основной домен страницы для извлечения признаков third-party
-        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-        if (!tab.url || tab.url.startsWith('chrome://')) {
-            sendResponse({ status: "Cannot process internal pages" });
+        // Ограничиваем размер обучающей выборки
+        if (trainingData.length > 500) {
+            trainingData = trainingData.slice(-500);
+        }
+
+        // Обучение с ограничениями для производительности
+        net.train(trainingData, { 
+            iterations: 50, 
+            log: false, 
+            errorThresh: 0.05,
+            learningRate: 0.3
+        });
+        
+        // Сохраняем модель и данные
+        await chrome.storage.local.set({ 
+            brainModel: net.toJSON(),
+            trainingData: trainingData
+        });
+        
+        console.log(`Модель обучена. Размер выборки: ${trainingData.length}`);
+    } catch (error) {
+        console.error('Ошибка при обучении модели:', error);
+    }
+}
+
+// Обновление динамических правил через declarativeNetRequest API
+async function updateBlockingRules(domainToBlock) {
+    try {
+        // Проверяем, нет ли уже правила для этого домена
+        const existingRules = await chrome.declarativeNetRequest.getDynamicRules();
+        
+        const alreadyBlocked = existingRules.some(rule => 
+            rule.condition && rule.condition.urlFilter && 
+            rule.condition.urlFilter.includes(domainToBlock)
+        );
+        
+        if (alreadyBlocked) {
+            console.log(`Домен ${domainToBlock} уже заблокирован`);
             return;
+        }
+
+        // Генерируем ID правила
+        const currentId = ruleIdCounter++;
+        
+        // Создаем правило для безопасной блокировки
+        const newRule = {
+            id: currentId,
+            priority: 1,
+            action: { type: "block" },
+            condition: { 
+                urlFilter: `||${domainToBlock}^`,
+                resourceTypes: ["script", "image", "sub_frame", "xmlhttprequest", "other", "media"]
+            }
+        };
+
+        // Добавляем правило
+        await chrome.declarativeNetRequest.updateDynamicRules({
+            addRules: [newRule]
+        });
+        
+        console.log(`Добавлено правило блокировки для домена: ${domainToBlock} (ID: ${currentId})`);
+        
+        // Сохраняем счетчик правил
+        await chrome.storage.local.set({ ruleIdCounter: ruleIdCounter });
+        
+        // Проверяем лимиты
+        const rules = await chrome.declarativeNetRequest.getDynamicRules();
+        if (rules.length >= 29000) {
+            console.warn('Приближаемся к лимиту динамических правил (30,000)');
+        }
+        
+    } catch (error) {
+        console.error("Ошибка при добавлении правила:", error);
+        ruleIdCounter--; // Откатываем счетчик при ошибке
+    }
+}
+
+// Удаление правил блокировки
+async function removeBlockingRules(domainToRemove) {
+    try {
+        const existingRules = await chrome.declarativeNetRequest.getDynamicRules();
+        
+        const rulesToRemove = existingRules.filter(rule => 
+            rule.condition && rule.condition.urlFilter && 
+            rule.condition.urlFilter.includes(domainToRemove)
+        );
+        
+        if (rulesToRemove.length > 0) {
+            await chrome.declarativeNetRequest.updateDynamicRules({
+                removeRuleIds: rulesToRemove.map(rule => rule.id)
+            });
+            console.log(`Удалены правила для домена: ${domainToRemove}`);
+        }
+    } catch (error) {
+        console.error('Ошибка при удалении правил:', error);
+    }
+}
+
+// Обработка пользовательского фидбека
+async function handleUserFeedback(url, block) {
+    try {
+        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+        if (!tab || !tab.url || tab.url.startsWith('chrome://')) {
+            return { status: "Cannot process internal pages" };
         }
         
         const mainDomain = new URL(tab.url).hostname;
@@ -247,40 +348,93 @@ chrome.runtime.onMessage.addListener(async (request, sender, sendResponse) => {
         const features = extractFeaturesFromUrl(url, mainDomain);
         const label = block ? 1 : 0;
         
-        // Добавляем данные в обучающую выборку
+        // Обновляем модель
         await trainModel(features, label);
 
-        // Если пользователь решил заблокировать, добавляем правило
+        // Управляем правилами
         if (block) {
             await updateBlockingRules(targetDomain);
         } else {
-            // TODO: Реализовать удаление правил для разрешенных доменов
-            console.log(`Пользователь разрешил ресурс: ${url}`);
+            await removeBlockingRules(targetDomain);
         }
 
-        sendResponse({ status: "Model updated and rules applied." });
+        return { status: "success", message: "Model updated and rules applied." };
+    } catch (error) {
+        console.error('Ошибка при обработке фидбека:', error);
+        return { status: "error", message: error.message };
+    }
+}
+
+// Слушаем сообщения
+chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+    if (request.action === "userFeedback") {
+        const { url, block } = request;
+        handleUserFeedback(url, block).then(sendResponse);
+        return true; // Для асинхронного ответа
     } else if (request.action === "getPrediction") {
-        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-        if (!tab.url || tab.url.startsWith('chrome://')) {
-            sendResponse({ prediction: 0 });
-            return;
-        }
-        
-        const mainDomain = new URL(tab.url).hostname;
-        const features = extractFeaturesFromUrl(request.url, mainDomain);
-        const prediction = net.run(features);
-        
-        sendResponse({ prediction: prediction });
+        chrome.tabs.query({ active: true, currentWindow: true }, async (tabs) => {
+            try {
+                const tab = tabs[0];
+                if (!tab || !tab.url || tab.url.startsWith('chrome://')) {
+                    sendResponse({ prediction: 0 });
+                    return;
+                }
+                
+                const mainDomain = new URL(tab.url).hostname;
+                const features = extractFeaturesFromUrl(request.url, mainDomain);
+                const prediction = net.run(features);
+                
+                sendResponse({ prediction: prediction });
+            } catch (error) {
+                console.error('Ошибка при получении предсказания:', error);
+                sendResponse({ prediction: 0 });
+            }
+        });
+        return true;
+    } else if (request.action === "getStats") {
+        chrome.storage.local.get(['brainModel', 'trainingData'], (result) => {
+            const stats = {
+                modelExists: !!result.brainModel,
+                trainingDataSize: result.trainingData ? result.trainingData.length : 0,
+                sessionDataSize: Object.keys(sessionData).length
+            };
+            sendResponse(stats);
+        });
+        return true;
     }
 });
 
 // Инициализация при запуске
 initializeNetwork();
 
-// Очистка старых правил при обновлении
-chrome.runtime.onUpdateAvailable.addListener(() => {
-    console.log("Обновление доступно, очистка старых правил...");
-    chrome.declarativeNetRequest.updateDynamicRules({
-        removeRuleIds: Array.from({length: ruleIdCounter}, (_, i) => i + 1)
-    });
+// Очистка при обновлении расширения
+chrome.runtime.onInstalled.addListener(async (details) => {
+    if (details.reason === 'update') {
+        console.log("Обновление расширения...");
+        
+        // Можно добавить миграцию данных при обновлении
+        try {
+            const rules = await chrome.declarativeNetRequest.getDynamicRules();
+            console.log(`Текущее количество правил: ${rules.length}`);
+            
+            // Сбрасываем счетчик правил на максимальный существующий ID
+            if (rules.length > 0) {
+                const maxId = Math.max(...rules.map(r => r.id));
+                ruleIdCounter = maxId + 1;
+                await chrome.storage.local.set({ ruleIdCounter: ruleIdCounter });
+            }
+        } catch (error) {
+            console.error('Ошибка при инициализации после обновления:', error);
+        }
+    }
 });
+
+// Экспорт для тестирования (если нужно)
+if (typeof module !== 'undefined' && module.exports) {
+    module.exports = {
+        initializeNetwork,
+        updateBlockingRules,
+        removeBlockingRules,
+        handleUserFeedback
+    };
+}
