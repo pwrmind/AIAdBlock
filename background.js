@@ -6,22 +6,24 @@ importScripts('featureExtractor.js');
 
 let net;
 let trainingData = [];
-const mainDomainCache = {}; // Кэш доменов для определения third-party
+// Инициализация счетчика правил по умолчанию (если еще не сохранен в storage)
+let ruleIdCounter = 1; 
 
 // Инициализация сети или загрузка из хранилища
 async function initializeNetwork() {
     net = new brain.NeuralNetwork();
-    const storedModelJson = await chrome.storage.local.get(['brainModel', 'trainingData']);
+    const storedData = await chrome.storage.local.get(['brainModel', 'trainingData', 'ruleIdCounter']);
     
-    if (storedModelJson.brainModel) {
-        net.fromJSON(storedModelJson.brainModel); // Возобновляем обучение
-    } else {
-        // Начальная пустая модель
-        console.log("Initializing new brain.js model.");
+    if (storedData.brainModel) {
+        net.fromJSON(storedData.brainModel);
     }
 
-    if (storedModelJson.trainingData) {
-        trainingData = storedModelJson.trainingData;
+    if (storedData.trainingData) {
+        trainingData = storedData.trainingData;
+    }
+
+    if (storedData.ruleIdCounter) {
+        ruleIdCounter = storedData.ruleIdCounter;
     }
 }
 
@@ -34,8 +36,7 @@ async function trainModel(features, label) {
         output: [label]
     });
 
-    // Обучаем модель на всем наборе данных (простой пример)
-    net.train(trainingData, { iterations: 200, log: true, errorThresh: 0.005 });
+    net.train(trainingData, { iterations: 200, log: false, errorThresh: 0.005 });
     
     // Сохраняем модель и данные
     await chrome.storage.local.set({ 
@@ -44,30 +45,35 @@ async function trainModel(features, label) {
     });
 }
 
-// Функция для обновления динамических правил dNR
-async function updateBlockingRules() {
-    // В реальном приложении вы бы здесь предсказали тысячи доменов
-    // и сгенерировали правила. Для примера мы просто добавим
-    // статическое правило, чтобы показать механику обновления.
-
-    // В более сложном случае: генерируете список из 1000 "плохих" доменов 
-    // используя обученную модель и сохраняете их как правила.
-
-    const newRules = [{
-        id: 1, // Правила должны иметь уникальные ID
+// НОВАЯ ФУНКЦИЯ: Обновление динамических правил dNR
+// Принимает домен для добавления в список блокировки
+async function updateBlockingRules(domainToBlock) {
+    // Получаем текущее максимальное ID из хранилища и инкрементируем его
+    const currentId = ruleIdCounter++; 
+    
+    const newRule = {
+        id: currentId, // Используем уникальный ID
         priority: 1,
         action: { type: "block" },
         condition: { 
-            urlFilter: "doubleclick.net", // Пример домена для блокировки
-            resourceTypes: ["script", "image", "sub_frame"]
+            // Фильтр для блокировки всего трафика на этот домен и поддомены
+            urlFilter: `||${domainToBlock}^`, 
+            resourceTypes: ["script", "image", "sub_frame", "main_frame", "xmlhttprequest", "other"]
         }
-    }];
+    };
 
-    // Удаляем старые правила и добавляем новые динамически
+    // Обновляем правила: добавляем новое правило
     chrome.declarativeNetRequest.updateDynamicRules({
-        removeRuleIds: [1], // ID существующих правил, которые нужно удалить
-        addRules: newRules
-    }, () => console.log("Dynamic rules updated."));
+        addRules: [newRule]
+    }, () => {
+        if (chrome.runtime.lastError) {
+            console.error("Ошибка при добавлении правила:", chrome.runtime.lastError);
+        } else {
+            console.log(`Dynamic rule added for: ${domainToBlock} with ID: ${currentId}`);
+            // Сохраняем обновленный счетчик ID после успешного добавления
+            chrome.storage.local.set({ ruleIdCounter: ruleIdCounter });
+        }
+    });
 }
 
 
@@ -79,13 +85,19 @@ chrome.runtime.onMessage.addListener(async (request, sender, sendResponse) => {
         // Получаем основной домен страницы для извлечения признаков third-party
         const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
         const mainDomain = new URL(tab.url).hostname;
+        const targetDomain = new URL(url).hostname; // Домен, который нужно заблокировать/разрешить
 
         const features = extractFeaturesFromUrl(url, mainDomain);
         const label = block ? 1 : 0;
 
         console.log(`Training model with features for ${url}, label: ${label}`);
         await trainModel(features, label);
-        await updateBlockingRules(); // Обновляем правила после обучения
+
+        // Если пользователь решил заблокировать, вызываем новую функцию с доменом
+        if (block) {
+            await updateBlockingRules(targetDomain);
+        }
+        // TODO: Реализовать логику удаления правил, если пользователь нажал "Разрешить"
 
         sendResponse({ status: "Model updated and rules applied." });
     }
