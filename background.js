@@ -262,6 +262,70 @@ async function trainModel(features, label) {
     }
 }
 
+/**
+ * Рассчитывает энтропию Шеннона для доменного имени (сырой признак).
+ * Возвращает нормированное значение от 0 до 1.
+ */
+function calculateDomainEntropy(domain) {
+    // Убираем TLD (например, .com), чтобы фокусироваться на имени
+    const name = domain.split('.').slice(0, -1).join(''); 
+    
+    const frequencies = {};
+    for (const char of name) {
+        frequencies[char] = (frequencies[char] || 0) + 1;
+    }
+
+    let entropy = 0;
+    const totalChars = name.length;
+    for (const char in frequencies) {
+        const probability = frequencies[char] / totalChars;
+        entropy -= probability * Math.log2(probability);
+    }
+    
+    // Нормализуем энтропию (обычно макс. энтропия для домена ~4-5)
+    return normalize(entropy, 6.0); 
+}
+
+
+/**
+ * Рассчитывает частоту распространенных биграмм в URL.
+ * Возвращает объект признаков (freq_ad, freq_er, freq_st, ...).
+ */
+function calculateNgramFrequencies(urlPath) {
+    const path = urlPath.toLowerCase();
+    
+    // Выберите 5-10 самых распространенных и самых редких биграмм
+    // (например, "er" часто в словах, "zq" редко)
+    const commonNgrams = [
+        "th", "he", "in", "er", "an", "re", "nd", "on", "at", "en",
+        "es", "ed", "ou", "to", "it", "st", "nt", "ha", "ng", "as",
+        "or", "se", "hi", "ea", "is", "ar", "ve", "ra", "ld", "ur",
+        "al", "le", "ro", "ri", "el", "la", "ti", "ne", "co", "de",
+        "me", "na", "li", "si", "ll", "te", "fo", "ic", "of", "ac",
+        "ta", "ce", "io", "us", "ul", "et", "ec", "wh", "om", "ut",
+        "ct", "pr", "be", "tr", "id", "il", "no", "so", "lo", "pe",
+        "ss", "ho", "ay", "pl", "ad", "ch", "un", "ot", "wa", "ap",
+        "po", "ke", "ow", "we", "am", "go", "ma", "pa", "ca", "op",
+        "'s", "'t", "'m", "'ll", "'re", "'ve", "qu", "gh", "ck", "bb"
+    ];
+
+    const features = {};
+
+    for (const ngram of commonNgrams) {
+        let count = 0;
+        let pos = path.indexOf(ngram);
+        while (pos !== -1) {
+            count++;
+            pos = path.indexOf(ngram, pos + 1);
+        }
+        // Нормализуем частоту вхождения (макс. 5 вхождений на путь)
+        features[`ngram_${ngram}`] = normalize(count, 5); 
+    }
+    
+    return features;
+}
+
+
 // Обновление динамических правил через declarativeNetRequest API
 async function updateBlockingRules(domainToBlock) {
     console.log("[updateBlockingRules] ", domainToBlock);
