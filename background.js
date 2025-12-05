@@ -286,6 +286,14 @@ function calculateDomainEntropy(domain) {
     return normalize(entropy, 6.0); 
 }
 
+/**
+ * Простая функция нормализации: сжимает значение в диапазон [0, 1] 
+ * с помощью сигмоидной функции или простой обрезки/шкалирования.
+ */
+function normalize(value, maxValue) {
+    if (value > maxValue) return 1.0;
+    return value / maxValue;
+}
 
 /**
  * Рассчитывает частоту распространенных биграмм в URL.
