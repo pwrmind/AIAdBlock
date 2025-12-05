@@ -1,17 +1,48 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <meta charset="UTF-8">
-    <style>
-        body { width: 200px; padding: 10px; }
-        button { width: 100%; margin-top: 5px; }
-    </style>
+  <meta charset="utf-8">
+  <style>
+    body { width: 300px; padding: 15px; font-family: Arial, sans-serif; }
+    .status { margin-bottom: 15px; padding: 10px; border-radius: 5px; }
+    .collecting { background-color: #fff3cd; border: 1px solid #ffeaa7; }
+    .training { background-color: #d1ecf1; border: 1px solid #bee5eb; }
+    .active { background-color: #d4edda; border: 1px solid #c3e6cb; }
+    .button { 
+      padding: 8px 12px; 
+      background-color: #007bff; 
+      color: white; 
+      border: none; 
+      border-radius: 4px; 
+      cursor: pointer;
+      margin-right: 10px;
+    }
+    .button:hover { background-color: #0056b3; }
+    .stats { margin-top: 15px; font-size: 12px; color: #666; }
+  </style>
 </head>
 <body>
-    <h3>Обучение модели</h3>
-    <p id="status">Ожидание действия...</p>
-    <button id="blockBtn">Блокировать текущий сайт</button>
-    <button id="allowBtn">Разрешить текущий сайт</button>
-    <script src="popup.js"></script>
+  <h3>Автономный детектор аномалий</h3>
+  
+  <div id="status" class="status collecting">
+    <strong>Статус:</strong> <span id="statusText">Загрузка...</span>
+  </div>
+  
+  <div id="stats">
+    <p><strong>Образцов собрано:</strong> <span id="samplesCount">0</span></p>
+    <p><strong>Доменов заблокировано:</strong> <span id="blockedCount">0</span></p>
+    <p><strong>Порог аномалии:</strong> <span id="threshold">0.0000</span></p>
+  </div>
+  
+  <div style="margin-top: 15px;">
+    <button id="trainBtn" class="button">Запустить обучение</button>
+    <button id="refreshBtn" class="button">Обновить</button>
+  </div>
+  
+  <div class="stats">
+    <p id="lastUpdate">Последнее обновление: --:--:--</p>
+  </div>
+  
+  <script src="popup.js"></script>
 </body>
 </html>
